@@ -2,11 +2,6 @@
 Hardware-efficient Bilinear Image Scaler for FPGA deployment. Utilizes Q8.8 fixed-point arithmetic and DSP48 slices for parallel RGB processing without floating-point overhead.
 # FPGA-Based High-Performance Bilinear Image Scaler 🚀
 
-![Language](https://img.shields.io/badge/Language-Verilog-blue.svg)
-![Tools](https://img.shields.io/badge/Tools-Xilinx_Vivado-orange.svg)
-![Reference](https://img.shields.io/badge/Reference_Model-Python-yellow.svg)
-![Status](https://img.shields.io/badge/Status-Verified-brightgreen.svg)
-![Event](https://img.shields.io/badge/Event-I--Chip_'26_%2F_UDYAM_'26-purple.svg)
 
 ## 📌 Overview
 This repository contains the RTL source code, verification environment, and Python reference models for a high-performance, hardware-efficient **Bilinear Interpolation Image Scaler**. Designed from the ground up for FPGA deployment, this core scales images in real-time without relying on external memory buffers or slow Finite State Machine (FSM) control logic. 
