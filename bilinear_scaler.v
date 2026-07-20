@@ -1,158 +1,131 @@
 `timescale 1ns / 1ps
 
-module image_scaler #(
-    parameter W_IN      = 3840,
-    parameter H_IN      = 2400,
-    parameter W_OUT     = 1920,
-    parameter H_OUT     = 1200,
-    parameter CHANNELS  = 3,     
-    parameter FRAC_BITS = 8      
+module bilinear_scaler_rgb #(
+    parameter IN_W  = 100,      
+    parameter IN_H  = 100,
+    parameter OUT_W = 400,      
+    parameter OUT_H = 400,
+    parameter IN_FILE  = "image_in_24b.hex",
+    parameter OUT_FILE = "image_out_24b.hex"
 )(
     input  wire clk,
-    input  wire rst,
+    input  wire rst_n,
     input  wire start,
-    output reg  done,
-    output reg [7:0] debug_state
+    output reg  done
 );
 
-    localparam IDLE           = 0;
-    localparam CALC_COORDS    = 1;
-    localparam FETCH_DATA     = 2;
-    localparam INTERP_X       = 3;
-    localparam INTERP_Y       = 4;
-    localparam WRITE_PIXEL    = 5;
-    localparam DUMP_FILE      = 6;
+    reg [23:0] mem_in  [0 : (IN_W * IN_H) - 1];
+    reg [23:0] mem_out [0 : (OUT_W * OUT_H) - 1];
 
-    reg [7:0] input_mem  [0:(W_IN * H_IN * CHANNELS - 1)];
-    reg [7:0] output_mem [0:(W_OUT * H_OUT * CHANNELS - 1)];
-
-    integer f, i;
-
-    reg [2:0] state;
-    reg [15:0] x_out, y_out;
-    reg [1:0]  ch;
-
-    reg [31:0] x_in_fixed, y_in_fixed;
-    
-    reg [15:0] x0, y0;
-    reg [15:0] x1, y1;
-    reg [7:0]  a, b;
-
-    reg [7:0] I00, I10, I01, I11;
-
-    reg signed [17:0] interp_top;
-    reg signed [17:0] interp_bottom;
-    reg signed [17:0] result;
-
-    wire [31:0] scale_x = (W_IN << 8) / W_OUT;
-    wire [31:0] scale_y = (H_IN << 8) / H_OUT;
-
+    integer i;
     initial begin
-        
-        $readmemh("input_image.hex", input_mem);
+        $readmemh(IN_FILE, mem_in);
+        for (i = 0; i < OUT_W * OUT_H; i = i + 1) mem_out[i] = 24'b0;
     end
 
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
-            state <= IDLE;
-            done  <= 0;
-            x_out <= 0;
-            y_out <= 0;
-            ch    <= 0;
-            debug_state <= 0;
+    localparam [15:0] SCALE_X = (IN_W << 8) / OUT_W;
+    localparam [15:0] SCALE_Y = (IN_H << 8) / OUT_H;
+    localparam [8:0]  ONE     = 256;
+
+    reg active; 
+
+    
+    reg [15:0] x_out_q1, y_out_q1;
+    reg valid_q1;
+
+  
+    reg [15:0] x_out_q2, y_out_q2;
+    reg [15:0] x0_q2, y0_q2, x1_q2, y1_q2;
+    reg [8:0]  a_q2, b_q2, inv_a_q2, inv_b_q2;
+    reg valid_q2;
+
+  
+    reg [15:0] x_out_q3, y_out_q3;
+    reg [23:0] p00_q3, p10_q3, p01_q3, p11_q3; 
+    reg [17:0] w00_q3, w10_q3, w01_q3, w11_q3; 
+    reg valid_q3;
+
+   
+    reg [15:0] x_out_q4, y_out_q4;
+    reg [31:0] sum_R, sum_G, sum_B;
+    reg valid_q4;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            active <= 0; done <= 0;
+            valid_q1 <= 0; valid_q2 <= 0; valid_q3 <= 0; valid_q4 <= 0;
+            x_out_q1 <= 0; y_out_q1 <= 0;
         end else begin
-            case (state)
-                IDLE: begin
-                    done <= 0;
-                    if (start) begin
-                        x_out <= 0;
-                        y_out <= 0;
-                        ch    <= 0;
-                        state <= CALC_COORDS;
-                    end
+            
+            if (start && !active) active <= 1;
+
+            if (active) begin
+                valid_q1 <= 1;
+                x_out_q1 <= (x_out_q1 == OUT_W - 1) ? 0 : x_out_q1 + 1;
+                if (x_out_q1 == OUT_W - 1) begin
+                    y_out_q1 <= y_out_q1 + 1;
+                    if (y_out_q1 == OUT_H - 1) active <= 0; // Stop feeding pipeline
                 end
+            end else begin
+                valid_q1 <= 0;
+            end
 
-                CALC_COORDS: begin
-                    debug_state <= 1;
-                    x_in_fixed <= x_out * scale_x;
-                    y_in_fixed <= y_out * scale_y;
-                    state <= FETCH_DATA;
-                end
+            valid_q2 <= valid_q1;
+            x_out_q2 <= x_out_q1; y_out_q2 <= y_out_q1;
+            
+            if (valid_q1) begin
+                x0_q2 <= (x_out_q1 * SCALE_X) >> 8;
+                y0_q2 <= (y_out_q1 * SCALE_Y) >> 8;
+                a_q2  <= (x_out_q1 * SCALE_X) & 8'hFF;
+                b_q2  <= (y_out_q1 * SCALE_Y) & 8'hFF;
+                
+                inv_a_q2 <= ONE - ((x_out_q1 * SCALE_X) & 8'hFF);
+                inv_b_q2 <= ONE - ((y_out_q1 * SCALE_Y) & 8'hFF);
+                
+                x1_q2 <= (((x_out_q1 * SCALE_X) >> 8) >= IN_W - 1) ? IN_W - 1 : ((x_out_q1 * SCALE_X) >> 8) + 1;
+                y1_q2 <= (((y_out_q1 * SCALE_Y) >> 8) >= IN_H - 1) ? IN_H - 1 : ((y_out_q1 * SCALE_Y) >> 8) + 1;
+            end
 
-                FETCH_DATA: begin
-                    debug_state <= 2;
-                    x0 <= x_in_fixed[31:8];
-                    y0 <= y_in_fixed[31:8];
-                    a  <= x_in_fixed[7:0];
-                    b  <= y_in_fixed[7:0];
+            valid_q3 <= valid_q2;
+            x_out_q3 <= x_out_q2; y_out_q3 <= y_out_q2;
+            
+            if (valid_q2) begin
 
-                    x1 <= (x0 + 1 < W_IN) ? x0 + 1 : x0;
-                    y1 <= (y0 + 1 < H_IN) ? y0 + 1 : y0;
+                p00_q3 <= mem_in[y0_q2 * IN_W + x0_q2];
+                p10_q3 <= mem_in[y0_q2 * IN_W + x1_q2];
+                p01_q3 <= mem_in[y1_q2 * IN_W + x0_q2];
+                p11_q3 <= mem_in[y1_q2 * IN_W + x1_q2];
 
-                    I00 <= input_mem[(y0 * W_IN + x0) * CHANNELS + ch];
-                    I10 <= input_mem[(y0 * W_IN + x1) * CHANNELS + ch];
-                    I01 <= input_mem[(y1 * W_IN + x0) * CHANNELS + ch];
-                    I11 <= input_mem[(y1 * W_IN + x1) * CHANNELS + ch];
+                w00_q3 <= inv_a_q2 * inv_b_q2;
+                w10_q3 <= a_q2     * inv_b_q2;
+                w01_q3 <= inv_a_q2 * b_q2;
+                w11_q3 <= a_q2     * b_q2;
+            end
 
-                    state <= INTERP_X;
-                end
+            valid_q4 <= valid_q3;
+            x_out_q4 <= x_out_q3; y_out_q4 <= y_out_q3;
+            
+            if (valid_q3) begin
+               
+                 sum_R <= (w00_q3 * p00_q3[23:16]) + (w10_q3 * p10_q3[23:16]) + 
+                         (w01_q3 * p01_q3[23:16]) + (w11_q3 * p11_q3[23:16]);
+                       
+                sum_G <= (w00_q3 * p00_q3[15:8])  + (w10_q3 * p10_q3[15:8]) + 
+                         (w01_q3 * p01_q3[15:8])  + (w11_q3 * p11_q3[15:8]);
+                
+                sum_B <= (w00_q3 * p00_q3[7:0])   + (w10_q3 * p10_q3[7:0]) + 
+                         (w01_q3 * p01_q3[7:0])   + (w11_q3 * p11_q3[7:0]);
+            end
 
-                INTERP_X: begin
-                    debug_state <= 3;
-                    interp_top    <= $signed({1'b0, I00}) + (($signed({1'b0, a}) * ($signed({1'b0, I10}) - $signed({1'b0, I00}))) >>> 8);
-                    interp_bottom <= $signed({1'b0, I01}) + (($signed({1'b0, a}) * ($signed({1'b0, I11}) - $signed({1'b0, I01}))) >>> 8);
-                    state <= INTERP_Y;
-                end
+            if (valid_q4) begin
 
-                INTERP_Y: begin
-                    debug_state <= 4;
-                    result <= interp_top + (($signed({1'b0, b}) * (interp_bottom - interp_top)) >>> 8);
-                    state <= WRITE_PIXEL;
-                end
-
-                WRITE_PIXEL: begin
-                    debug_state <= 5;
-                    
-                    if (result < 0)
-                        output_mem[(y_out * W_OUT + x_out) * CHANNELS + ch] <= 0;
-                    else if (result > 255)
-                        output_mem[(y_out * W_OUT + x_out) * CHANNELS + ch] <= 255;
-                    else
-                        output_mem[(y_out * W_OUT + x_out) * CHANNELS + ch] <= result[7:0];
-
-                    if (ch < CHANNELS - 1) begin
-                        ch <= ch + 1;
-                        state <= FETCH_DATA;
-                    end else begin
-                        ch <= 0;
-                        if (x_out < W_OUT - 1) begin
-                            x_out <= x_out + 1;
-                            state <= CALC_COORDS;
-                        end else begin
-                            x_out <= 0;
-                            if (y_out < H_OUT - 1) begin
-                                y_out <= y_out + 1;
-                                state <= CALC_COORDS;
-                            end else begin
-                                state <= DUMP_FILE;
-                            end
-                        end
-                    end
-                end
-
-                DUMP_FILE: begin
-                    debug_state <= 6;
-                    f = $fopen("output_image.hex", "w");
-                    if (f) begin
-                        for (i = 0; i < W_OUT * H_OUT * CHANNELS; i = i + 1) begin
-                            $fdisplay(f, "%h", output_mem[i]);
-                        end
-                        $fclose(f);
-                    end
+                mem_out[y_out_q4 * OUT_W + x_out_q4] <= {sum_R[23:16], sum_G[23:16], sum_B[23:16]};
+                
+                if (x_out_q4 == OUT_W - 1 && y_out_q4 == OUT_H - 1) begin
                     done <= 1;
-                    state <= IDLE;
+                    $writememh(OUT_FILE, mem_out);
                 end
-            endcase
+            end
         end
     end
 endmodule
